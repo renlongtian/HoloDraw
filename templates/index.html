@@ -1,0 +1,814 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>量子全息手势控制终端</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            overflow: hidden;
+            background: #010206;
+            font-family: 'Share Tech Mono', monospace, "Microsoft YaHei";
+            color: #7dd3fc;
+        }
+        canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; }
+        #video-feed {
+            position: fixed;
+            inset: 0;
+            width: 100vw;
+            height: 100vh;
+            object-fit: cover;
+            z-index: 0;
+            opacity: 0.48;
+            filter: blur(4.2px) contrast(0.8) saturate(0.48) brightness(0.84);
+            pointer-events: none;
+        }
+        #bg-canvas    { z-index: 1; pointer-events: none; }
+        #webgl-canvas { z-index: 2; transition: opacity 0.5s; pointer-events: none; }
+        #draw-canvas  { z-index: 3; pointer-events: none; }
+        #hud-canvas   { z-index: 4; pointer-events: none; }
+
+        .panel {
+            background: rgba(2, 6, 23, 0.45);
+            border: 1px solid rgba(56, 189, 248, 0.12);
+            box-shadow: inset 0 0 12px rgba(14, 165, 233, 0.04), 0 0 15px rgba(0, 0, 0, 0.4);
+            backdrop-filter: blur(20px);
+        }
+        .corner { position: relative; }
+        .corner::before, .corner::after {
+            content: ''; position: absolute; width: 14px; height: 14px; border-color: #38bdf8;
+        }
+        .corner::before { left: -1px; top: -1px; border-left: 2px solid; border-top: 2px solid; }
+        .corner::after { right: -1px; bottom: -1px; border-right: 2px solid; border-bottom: 2px solid; }
+
+        .tab-btn {
+            width: 100%; text-align: left; padding: 9px 12px; cursor: pointer;
+            border: 1px solid rgba(56, 189, 248, 0.14);
+            background: rgba(15, 23, 42, 0.55);
+            color: rgba(125, 211, 252, 0.72);
+            transition: all 0.2s;
+        }
+        .tab-btn.active {
+            color: #e0f2fe;
+            border-color: rgba(56, 189, 248, 0.55);
+            background: linear-gradient(90deg, rgba(2, 132, 199, 0.34), rgba(15, 23, 42, 0.72));
+        }
+
+        #sidebar { transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1); }
+        #sidebar.collapsed { transform: translateX(-290px); }
+
+        .alert-popup {
+            position: fixed; top: 22%; left: 50%;
+            transform: translate(-50%, -50%) scale(0.95);
+            z-index: 40; padding: 16px 24px; border-radius: 12px;
+            background: rgba(2, 26, 46, 0.92);
+            border: 1px solid rgba(56, 189, 248, 0.5);
+            font-weight: bold; letter-spacing: 2px;
+            pointer-events: none; opacity: 0;
+            transition: all 0.3s; text-align: center;
+            box-shadow: 0 0 30px rgba(56, 189, 248, 0.2);
+        }
+    </style>
+</head>
+<body>
+    <canvas id="bg-canvas"></canvas>
+    <img id="video-feed" src="/video_feed" alt="">
+    <canvas id="webgl-canvas"></canvas>
+    <canvas id="draw-canvas"></canvas>
+    <canvas id="hud-canvas"></canvas>
+
+    <div id="alert-popup" class="alert-popup">
+        <div id="alert-text" class="text-lg text-sky-200"></div>
+        <div id="alert-sub" class="text-[10px] text-sky-400 mt-1"></div>
+    </div>
+
+    <!-- UI -->
+    <div class="fixed inset-0 z-10 pointer-events-none p-5 flex justify-between">
+        <div id="sidebar" class="relative pointer-events-auto w-72 h-fit">
+            <aside class="panel corner w-full p-4 rounded-xl space-y-4">
+                <div>
+                    <h1 class="text-lg font-black tracking-widest text-sky-300">QUANTUM TERMINAL</h1>
+                    <p class="text-[10px] text-sky-600 mt-1">PYTHON BACKEND v2.0</p>
+                </div>
+                <div class="space-y-2">
+                    <div class="text-[11px] text-sky-500 border-b border-sky-900/60 pb-1">模式 / MODE</div>
+                    <button class="tab-btn active rounded-lg" data-mode="write">模式A / 空中写字</button>
+                    <button class="tab-btn rounded-lg" data-mode="nebula">模式B / 量子星云球</button>
+                </div>
+                <div class="space-y-1.5 text-xs">
+                    <div class="text-[11px] text-sky-500 border-b border-sky-900/60 pb-1">状态 / STATUS</div>
+                    <div class="flex justify-between"><span class="text-sky-600">SERVER:</span><span id="st-server" class="text-yellow-400">CONNECTING</span></div>
+                    <div class="flex justify-between"><span class="text-sky-600">HANDS:</span><span id="st-hands" class="text-sky-300">0</span></div>
+                    <div class="flex justify-between"><span class="text-sky-600">PEN:</span><span id="st-pen" class="text-sky-300">--</span></div>
+                    <div class="flex justify-between"><span class="text-sky-600">COLOR:</span><span id="st-color" class="text-cyan-300">CYAN</span></div>
+                    <div class="flex justify-between"><span class="text-sky-600">PAGE:</span><span id="st-page" class="text-sky-300">01</span></div>
+                    <div class="flex justify-between"><span class="text-sky-600">FPS:</span><span id="st-fps" class="text-sky-300">--</span></div>
+                </div>
+                <div class="space-y-2">
+                    <button id="clear-btn" class="w-full px-3 py-2 rounded-lg border border-rose-400/40 bg-rose-950/30 text-rose-200 text-xs hover:bg-rose-900/70 transition cursor-pointer">清除画迹</button>
+                </div>
+            </aside>
+            <button id="toggle-btn" class="absolute top-1/2 -right-10 -translate-y-1/2 p-2.5 rounded-r-xl border-t border-b border-r border-sky-400/25 bg-slate-950/90 text-sky-400 hover:bg-sky-900 transition cursor-pointer">
+                <span id="toggle-icon">◀</span>
+            </button>
+        </div>
+
+        <div class="panel corner h-fit p-4 rounded-xl text-[11px] text-sky-500 hidden md:block pointer-events-auto">
+            <div class="text-sky-300 font-bold tracking-widest mb-2">[ CONTROLS ]</div>
+            <div class="space-y-1 text-sky-400/80">
+                <p>✏️ 右手捏合 → 写字</p>
+                <p>👋 左手移动 → 拖动画布</p>
+                <p>🖐️ 左手张开停住 → 工具盘</p>
+                <p>👌 右手捏合 → 确认颜色</p>
+                <p>🔮 模式B: 双手控球</p>
+            </div>
+            <div class="mt-3 pt-2 border-t border-sky-900/60">
+                <div id="gesture-info" class="text-sky-400 font-bold">等待连接...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    // ===== 配置 =====
+    const VIRTUAL_PAGES = 12;
+    const VIRTUAL_ROWS = 3;
+    const PINCH_THRESHOLD = 0.055;
+    const FIST_THRESHOLD = 1.15;
+    const MIN_DRAW_DIST = 1.5;
+    const PAN_GAIN = 1.35;
+    const PAN_SMOOTH = 0.16;
+    const PAN_FRICTION = 0.92;
+    const PAN_STOP = 0.25;
+    const TOOL_HOLD_MS = 600;
+    const TOOL_LOST_MS = 450;
+    const TOOL_STILL_RADIUS = 42;
+    const TOOL_BAR_TOP = 28;
+    const TOOL_BAR_WIDTH = 420;
+    const TOOL_BAR_HEIGHT = 68;
+    const TOOL_ITEM_RADIUS = 22;
+
+    // 1-Euro Filter for frontend (backup smoothing)
+    class OneEuro {
+        constructor(minCutoff=1.2, beta=0.005) {
+            this.minCutoff=minCutoff; this.beta=beta; this.xp=null; this.dxp=0; this.tp=null;
+        }
+        alpha(c, dt) { const t=1/(2*Math.PI*c); return 1/(1+t/dt); }
+        call(x, t) {
+            if(this.tp===null){this.xp=x;this.tp=t;return x;}
+            let dt=t-this.tp; if(dt<=0)dt=1/30;
+            const ad=this.alpha(1,dt), dx=(x-this.xp)/dt, dxh=ad*dx+(1-ad)*this.dxp;
+            const c=this.minCutoff+this.beta*Math.abs(dxh), a=this.alpha(c,dt);
+            const xh=a*x+(1-a)*this.xp;
+            this.xp=xh; this.dxp=dxh; this.tp=t; return xh;
+        }
+        reset(){this.xp=null;this.tp=null;this.dxp=0;}
+    }
+    const penFilterX = new OneEuro(1.5, 0.004);
+    const penFilterY = new OneEuro(1.5, 0.004);
+
+    const PALETTE = [
+        { name: 'CYAN',   color: '#22d3ee', shadow: '#06b6d4' },
+        { name: 'RED',    color: '#f43f5e', shadow: '#e11d48' },
+        { name: 'GREEN',  color: '#34d399', shadow: '#10b981' },
+        { name: 'PURPLE', color: '#a78bfa', shadow: '#8b5cf6' },
+        { name: 'GOLD',   color: '#facc15', shadow: '#eab308' },
+    ];
+
+    // ===== 状态 =====
+    let mode = 'write';
+    let inkIdx = 0, inkColor = PALETTE[0].color, inkShadow = PALETTE[0].shadow;
+    let offsetX = 0, offsetY = 0, targetOffsetX = 0, targetOffsetY = 0, velocityX = 0, velocityY = 0, page = 1;
+    let drawing = false, penHistory = [], brushWidth = 5.5;
+    let lastLeftX = null, lastLeftY = null, lastLeftTime = null;
+    let frameCount = 0, fpsStart = performance.now();
+    let planeReady = false;
+    let toolMode = false, toolAnchor = null, toolHoldStart = 0, toolHoldPoint = null, toolLastSeen = 0, toolHoverIdx = -1, toolSelectCooldown = 0;
+
+    // ===== Canvas =====
+    const bgCanvas = document.getElementById('bg-canvas');
+    const drawCanvas = document.getElementById('draw-canvas');
+    const hudCanvas = document.getElementById('hud-canvas');
+    const webglCanvas = document.getElementById('webgl-canvas');
+    const videoFeed = document.getElementById('video-feed');
+    const bgCtx = bgCanvas.getContext('2d');
+    const dCtx = drawCanvas.getContext('2d');
+    const hCtx = hudCanvas.getContext('2d');
+
+    function resize() {
+        const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+        [bgCanvas, hudCanvas].forEach(c => {
+            c.width = window.innerWidth * dpr;
+            c.height = window.innerHeight * dpr;
+            c.style.width = window.innerWidth + 'px';
+            c.style.height = window.innerHeight + 'px';
+            c.getContext('2d').setTransform(dpr, 0, 0, dpr, 0, 0);
+        });
+        drawCanvas.width = window.innerWidth * VIRTUAL_PAGES;
+        drawCanvas.height = window.innerHeight * VIRTUAL_ROWS;
+        drawCanvas.style.width = (window.innerWidth * VIRTUAL_PAGES) + 'px';
+        drawCanvas.style.height = (window.innerHeight * VIRTUAL_ROWS) + 'px';
+        dCtx.lineCap = 'round';
+        dCtx.lineJoin = 'round';
+        if (!planeReady) {
+            targetOffsetY = offsetY = maxOffsetY() / 2;
+            updateViewportStatus();
+            planeReady = true;
+        } else {
+            targetOffsetX = clamp(targetOffsetX, maxOffsetX(), 0);
+            targetOffsetY = clamp(targetOffsetY, maxOffsetY(), 0);
+            offsetX = clamp(offsetX, maxOffsetX(), 0);
+            offsetY = clamp(offsetY, maxOffsetY(), 0);
+        }
+        if (renderer) {
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            cam3D.aspect = window.innerWidth / window.innerHeight;
+            cam3D.updateProjectionMatrix();
+        }
+    }
+    window.addEventListener('resize', resize);
+
+    // ===== 工具 =====
+    function clamp(v, mn, mx) { return Math.max(mn, Math.min(mx, v)); }
+    function toScreen(lm) { return { x: lm.x * window.innerWidth, y: lm.y * window.innerHeight }; }
+    function maxOffsetX() { return -window.innerWidth * (VIRTUAL_PAGES - 1); }
+    function maxOffsetY() { return -window.innerHeight * (VIRTUAL_ROWS - 1); }
+
+    function updateViewportStatus() {
+        const col = Math.min(VIRTUAL_PAGES, Math.max(1, Math.floor(Math.abs(targetOffsetX) / window.innerWidth) + 1));
+        const row = Math.min(VIRTUAL_ROWS, Math.max(1, Math.floor(Math.abs(targetOffsetY) / window.innerHeight) + 1));
+        page = (row - 1) * VIRTUAL_PAGES + col;
+        document.getElementById('st-page').textContent = `${String(col).padStart(2, '0')}/${row}`;
+    }
+
+    function isPinch(lms) {
+        return Math.hypot(lms[8].x - lms[4].x, lms[8].y - lms[4].y) < PINCH_THRESHOLD;
+    }
+
+    function isFist(lms) {
+        const w = lms[0];
+        let total = 0;
+        [8,12,16,20].forEach((t, i) => {
+            const m = [5,9,13,17][i];
+            total += Math.hypot(lms[t].x - w.x, lms[t].y - w.y) / Math.hypot(lms[m].x - w.x, lms[m].y - w.y);
+        });
+        return (total / 4) < FIST_THRESHOLD;
+    }
+
+    function palmOpenness(lms) {
+        const w = lms[0];
+        let total = 0;
+        [8,12,16,20].forEach((tip, i) => {
+            const mcp = [5,9,13,17][i];
+            total += Math.hypot(lms[tip].x - w.x, lms[tip].y - w.y) / Math.hypot(lms[mcp].x - w.x, lms[mcp].y - w.y);
+        });
+        return total / 4;
+    }
+
+    function isOpenPalm(lms) {
+        const spread = Math.hypot(lms[8].x - lms[20].x, lms[8].y - lms[20].y);
+        return palmOpenness(lms) > 1.65 && spread > 0.16;
+    }
+
+    function palmCenter(lms) {
+        const p = toScreen(lms[9]);
+        return {
+            x: clamp(p.x, 130, window.innerWidth - 130),
+            y: clamp(p.y, 130, window.innerHeight - 130),
+        };
+    }
+
+    function showAlert(text, sub, color) {
+        const el = document.getElementById('alert-popup');
+        document.getElementById('alert-text').textContent = text;
+        document.getElementById('alert-sub').textContent = sub || '';
+        el.style.borderColor = color || '';
+        el.style.color = color || '';
+        el.style.opacity = '1';
+        el.style.transform = 'translate(-50%, -50%) scale(1.05)';
+        setTimeout(() => { el.style.opacity = '0'; el.style.transform = 'translate(-50%, -50%) scale(0.95)'; }, 900);
+    }
+
+    function setInk(idx) {
+        inkIdx = idx;
+        inkColor = PALETTE[inkIdx].color;
+        inkShadow = PALETTE[inkIdx].shadow;
+        const colorEl = document.getElementById('st-color');
+        colorEl.textContent = PALETTE[inkIdx].name;
+        colorEl.style.color = PALETTE[inkIdx].color;
+        drawing = false;
+        penHistory = [];
+    }
+
+    function paletteItemPosition(idx) {
+        const barWidth = Math.min(TOOL_BAR_WIDTH, window.innerWidth - 32);
+        const gap = barWidth / (PALETTE.length + 1);
+        return {
+            x: (window.innerWidth - barWidth) / 2 + gap * (idx + 1),
+            y: TOOL_BAR_TOP + TOOL_BAR_HEIGHT / 2,
+        };
+    }
+
+    function enterToolMode(anchor) {
+        toolMode = true;
+        toolAnchor = { x: window.innerWidth / 2, y: TOOL_BAR_TOP + TOOL_BAR_HEIGHT / 2 };
+        toolHoverIdx = -1;
+        drawing = false;
+        penHistory = [];
+        velocityX = 0;
+        velocityY = 0;
+        document.getElementById('st-pen').textContent = '工具盘';
+    }
+
+    function closeToolMode() {
+        toolMode = false;
+        toolAnchor = null;
+        toolHoverIdx = -1;
+        toolHoldStart = 0;
+        toolHoldPoint = null;
+    }
+
+    function updateToolMode(leftHand, rightHand) {
+        const now = performance.now();
+        if (!leftHand) {
+            if (toolMode && now - toolLastSeen > TOOL_LOST_MS) closeToolMode();
+            toolHoldStart = 0;
+            toolHoldPoint = null;
+            return;
+        }
+
+        const open = isOpenPalm(leftHand.landmarks);
+        const center = palmCenter(leftHand.landmarks);
+
+        if (!open) {
+            if (toolMode && now - toolLastSeen > TOOL_LOST_MS) closeToolMode();
+            toolHoldStart = 0;
+            toolHoldPoint = null;
+            return;
+        }
+
+        toolLastSeen = now;
+        if (toolMode) {
+            return;
+        }
+
+        if (!toolHoldPoint || Math.hypot(center.x - toolHoldPoint.x, center.y - toolHoldPoint.y) > TOOL_STILL_RADIUS) {
+            toolHoldPoint = center;
+            toolHoldStart = now;
+            return;
+        }
+
+        if (now - toolHoldStart >= TOOL_HOLD_MS) enterToolMode(center);
+    }
+
+    function handleToolSelection(selectorHand) {
+        if (!toolMode || !toolAnchor) return;
+        toolHoverIdx = -1;
+        if (!selectorHand) return;
+
+        const tip = toScreen(selectorHand.landmarks[8]);
+        PALETTE.forEach((item, idx) => {
+            const p = paletteItemPosition(idx);
+            if (Math.hypot(tip.x - p.x, tip.y - p.y) <= TOOL_ITEM_RADIUS + 12) toolHoverIdx = idx;
+        });
+
+        const now = performance.now();
+        if (toolHoverIdx >= 0 && isPinch(selectorHand.landmarks) && now > toolSelectCooldown) {
+            setInk(toolHoverIdx);
+            showAlert(`颜色: ${PALETTE[inkIdx].name}`, '工具盘选择', PALETTE[inkIdx].color);
+            toolSelectCooldown = now + 800;
+            closeToolMode();
+        }
+    }
+
+    // ===== live camera background =====
+    function drawImageCover(ctx, img, x, y, w, h) {
+        const iw = img.naturalWidth || img.videoWidth || img.width;
+        const ih = img.naturalHeight || img.videoHeight || img.height;
+        if (!iw || !ih) return;
+        const scale = Math.max(w / iw, h / ih);
+        const sw = w / scale;
+        const sh = h / scale;
+        const sx = (iw - sw) * 0.5;
+        const sy = (ih - sh) * 0.5;
+        ctx.drawImage(img, sx, sy, sw, sh, x, y, w, h);
+    }
+
+    function drawLiveCameraLayer(W, H, t, breath) {
+        if (!videoFeed.complete || !videoFeed.naturalWidth) return;
+
+        bgCtx.save();
+        bgCtx.globalAlpha = 0.24 + breath * 0.02;
+        bgCtx.filter = 'contrast(1.06) saturate(0.52) brightness(0.98)';
+        drawImageCover(bgCtx, videoFeed, 0, 0, W, H);
+        bgCtx.restore();
+
+        bgCtx.save();
+        const veil = bgCtx.createLinearGradient(0, 0, W, 0);
+        veil.addColorStop(0, 'rgba(1,2,6,0.68)');
+        veil.addColorStop(0.34, 'rgba(1,2,6,0.34)');
+        veil.addColorStop(0.72, 'rgba(1,2,6,0.28)');
+        veil.addColorStop(1, 'rgba(1,2,6,0.58)');
+        bgCtx.fillStyle = veil;
+        bgCtx.fillRect(0, 0, W, H);
+
+        const scanY = (t * 260) % H;
+        bgCtx.strokeStyle = 'rgba(56,189,248,0.045)';
+        bgCtx.lineWidth = 1;
+        for (let y = scanY - H; y < H; y += 34) {
+            bgCtx.beginPath();
+            bgCtx.moveTo(0, y);
+            bgCtx.lineTo(W, y);
+            bgCtx.stroke();
+        }
+        bgCtx.restore();
+    }
+
+    function drawBg() {
+        const W = window.innerWidth, H = window.innerHeight;
+        bgCtx.clearRect(0, 0, W, H);
+
+        const t = performance.now() * 0.00035;
+        const breath = (Math.sin(t * 2.4) + 1) / 2;
+
+        bgCtx.fillStyle = 'rgba(1, 2, 6, 0.31)';
+        bgCtx.fillRect(0, 0, W, H);
+
+        const mist = bgCtx.createRadialGradient(W * 0.58, H * 0.48, W * 0.02, W * 0.58, H * 0.48, W * 0.55);
+        mist.addColorStop(0, `rgba(125, 211, 252, ${0.18 + breath * 0.04})`);
+        mist.addColorStop(0.45, `rgba(168, 85, 247, ${0.145 + breath * 0.03})`);
+        mist.addColorStop(1, 'rgba(1, 2, 6, 0)');
+        bgCtx.fillStyle = mist;
+        bgCtx.fillRect(0, 0, W, H);
+
+        const edge = bgCtx.createRadialGradient(W * 0.5, H * 0.48, W * 0.18, W * 0.5, H * 0.48, W * 0.78);
+        edge.addColorStop(0, 'rgba(0, 0, 0, 0)');
+        edge.addColorStop(0.62, 'rgba(1, 2, 6, 0.16)');
+        edge.addColorStop(1, 'rgba(1, 2, 6, 0.56)');
+        bgCtx.fillStyle = edge;
+        bgCtx.fillRect(0, 0, W, H);
+
+        const wash = bgCtx.createLinearGradient(0, 0, W, H);
+        wash.addColorStop(0, 'rgba(56, 189, 248, 0.06)');
+        wash.addColorStop(0.5, 'rgba(255, 255, 255, 0.025)');
+        wash.addColorStop(1, 'rgba(217, 70, 239, 0.05)');
+        bgCtx.fillStyle = wash;
+        bgCtx.fillRect(0, 0, W, H);
+
+        for (let i = 0; i < 42; i++) {
+            const sx = (i * 197 + 33) % W;
+            const sy = (i * 131 + 17) % H;
+            const tw = 0.08 + Math.abs(Math.sin(t * 4 + i * 1.7)) * 0.22;
+            bgCtx.fillStyle = `rgba(255,255,255,${tw})`;
+            bgCtx.beginPath();
+            bgCtx.arc(sx, sy, (i % 3) * 0.35 + 0.45, 0, Math.PI * 2);
+            bgCtx.fill();
+        }
+
+        bgCtx.save();
+        bgCtx.strokeStyle = 'rgba(125, 211, 252, 0.055)';
+        bgCtx.lineWidth = 1;
+        const grid = 96;
+        const gx = ((offsetX * 0.18) % grid + grid) % grid;
+        const gy = ((offsetY * 0.18) % grid + grid) % grid;
+        for (let x = gx - grid; x < W + grid; x += grid) {
+            bgCtx.beginPath();
+            bgCtx.moveTo(x, 0);
+            bgCtx.lineTo(x + W * 0.08, H);
+            bgCtx.stroke();
+        }
+        for (let y = gy - grid; y < H + grid; y += grid) {
+            bgCtx.beginPath();
+            bgCtx.moveTo(0, y);
+            bgCtx.lineTo(W, y + H * 0.035);
+            bgCtx.stroke();
+        }
+        bgCtx.restore();
+    }
+
+    // ===== HUD 骨骼 =====
+    const CONNS = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[0,17],[17,18],[18,19],[19,20]];
+
+    function drawHud(hands) {
+        hCtx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+        hands.forEach(h => {
+            const lms = h.landmarks;
+            hCtx.save();
+            hCtx.strokeStyle = 'rgba(125,211,252,0.5)';
+            hCtx.lineWidth = 2;
+            hCtx.shadowColor = '#38bdf8'; hCtx.shadowBlur = 4;
+            CONNS.forEach(([a, b]) => {
+                const p1 = toScreen(lms[a]), p2 = toScreen(lms[b]);
+                hCtx.beginPath(); hCtx.moveTo(p1.x, p1.y); hCtx.lineTo(p2.x, p2.y); hCtx.stroke();
+            });
+            lms.forEach((lm, i) => {
+                const p = toScreen(lm);
+                const sp = (i === 4 || i === 8);
+                hCtx.fillStyle = sp ? '#34d399' : '#38bdf8';
+                hCtx.shadowColor = sp ? '#10b981' : '#0ea5e9';
+                hCtx.shadowBlur = sp ? 8 : 3;
+                hCtx.beginPath(); hCtx.arc(p.x, p.y, sp ? 6 : 3, 0, Math.PI * 2); hCtx.fill();
+            });
+            hCtx.restore();
+        });
+        drawToolPalette();
+    }
+
+    function drawToolPalette() {
+        if (!toolMode || !toolAnchor) return;
+
+        const barWidth = Math.min(TOOL_BAR_WIDTH, window.innerWidth - 32);
+        const x = (window.innerWidth - barWidth) / 2;
+        const y = TOOL_BAR_TOP;
+
+        hCtx.save();
+        hCtx.shadowColor = '#38bdf8';
+        hCtx.shadowBlur = 18;
+        hCtx.fillStyle = 'rgba(2, 6, 23, 0.62)';
+        hCtx.strokeStyle = 'rgba(125, 211, 252, 0.36)';
+        hCtx.lineWidth = 1;
+        hCtx.beginPath();
+        hCtx.roundRect(x, y, barWidth, TOOL_BAR_HEIGHT, 14);
+        hCtx.fill();
+        hCtx.stroke();
+
+        hCtx.shadowBlur = 0;
+        hCtx.fillStyle = 'rgba(224,242,254,0.86)';
+        hCtx.font = '11px "Share Tech Mono", monospace';
+        hCtx.textAlign = 'center';
+        hCtx.textBaseline = 'top';
+        hCtx.fillText('COLOR TOOLBAR', window.innerWidth / 2, y + 7);
+        hCtx.restore();
+
+        PALETTE.forEach((item, idx) => {
+            const p = paletteItemPosition(idx);
+            const active = idx === inkIdx;
+            const hover = idx === toolHoverIdx;
+            hCtx.save();
+            hCtx.shadowColor = item.shadow;
+            hCtx.shadowBlur = hover ? 22 : 10;
+            hCtx.fillStyle = item.color;
+            hCtx.strokeStyle = hover ? '#ffffff' : active ? 'rgba(255,255,255,0.88)' : 'rgba(224,242,254,0.42)';
+            hCtx.lineWidth = hover ? 3 : active ? 2 : 1;
+            hCtx.beginPath();
+            hCtx.arc(p.x, p.y, hover ? TOOL_ITEM_RADIUS + 5 : TOOL_ITEM_RADIUS, 0, Math.PI * 2);
+            hCtx.fill();
+            hCtx.stroke();
+            hCtx.restore();
+        });
+    }
+
+    function hexToRgba(hex, alpha) {
+        const clean = hex.replace('#', '');
+        const value = parseInt(clean.length === 3 ? clean.split('').map(c => c + c).join('') : clean, 16);
+        const r = (value >> 16) & 255;
+        const g = (value >> 8) & 255;
+        const b = value & 255;
+        return `rgba(${r},${g},${b},${alpha})`;
+    }
+
+    function traceInkPath(ctx, points) {
+        ctx.beginPath();
+        if (points.length >= 3) {
+            const n = points.length;
+            const p0 = points[n - 3], p1 = points[n - 2], p2 = points[n - 1];
+            ctx.moveTo((p0.x + p1.x) / 2, (p0.y + p1.y) / 2);
+            ctx.quadraticCurveTo(p1.x, p1.y, (p1.x + p2.x) / 2, (p1.y + p2.y) / 2);
+        } else {
+            const prev = points[points.length - 2] || points[0];
+            const p = points[points.length - 1];
+            ctx.moveTo(prev.x, prev.y);
+            ctx.lineTo(p.x, p.y);
+        }
+    }
+
+    function strokeInkLayer(points, width, color, shadowColor, shadowBlur, composite = 'source-over') {
+        dCtx.save();
+        dCtx.globalCompositeOperation = composite;
+        dCtx.lineCap = 'round';
+        dCtx.lineJoin = 'round';
+        dCtx.strokeStyle = color;
+        dCtx.lineWidth = width;
+        dCtx.shadowColor = shadowColor;
+        dCtx.shadowBlur = shadowBlur;
+        traceInkPath(dCtx, points);
+        dCtx.stroke();
+        dCtx.restore();
+    }
+
+    function drawInkSegment(points, width) {
+        strokeInkLayer(points, width * 3.2, hexToRgba(inkShadow, 0.16), inkShadow, 20, 'lighter');
+        strokeInkLayer(points, width * 2.0, hexToRgba(inkColor, 0.34), inkShadow, 10, 'source-over');
+        strokeInkLayer(points, width, hexToRgba(inkColor, 0.92), inkShadow, 5, 'source-over');
+        strokeInkLayer(points, Math.max(1.1, width * 0.28), 'rgba(255,255,255,0.38)', 'rgba(255,255,255,0.25)', 1, 'screen');
+    }
+
+    // ===== 书写 =====
+    function handleWrite(hand, canDraw = true) {
+        if (!canDraw) { drawing = false; penHistory = []; penFilterX.reset(); penFilterY.reset(); document.getElementById('st-pen').textContent = '工具选择'; return; }
+        if (!hand) { drawing = false; penHistory = []; penFilterX.reset(); penFilterY.reset(); document.getElementById('st-pen').textContent = '等待右手'; return; }
+        const lms = hand.landmarks;
+        const pinch = isPinch(lms);
+        const t8 = toScreen(lms[8]), t4 = toScreen(lms[4]);
+        const rx = (t8.x + t4.x) / 2, ry = (t8.y + t4.y) / 2;
+
+        const now = performance.now() / 1000;
+        const sx = penFilterX.call(rx, now);
+        const sy = penFilterY.call(ry, now);
+
+        const px = sx - offsetX, py = sy - offsetY;
+
+        if (pinch) {
+            document.getElementById('st-pen').textContent = '✏️ 书写中';
+            if (!drawing) { drawing = true; penHistory = [{ x: px, y: py }]; brushWidth = 5.8; return; }
+            const last = penHistory[penHistory.length - 1];
+            const moveDist = Math.hypot(px - last.x, py - last.y);
+            if (moveDist < MIN_DRAW_DIST) return;
+
+            penHistory.push({ x: px, y: py });
+            if (penHistory.length > 4) penHistory.shift();
+
+            const targetWidth = clamp(7.4 - moveDist * 0.08, 3.4, 7.4);
+            brushWidth += (targetWidth - brushWidth) * 0.28;
+            drawInkSegment(penHistory, brushWidth);
+        } else {
+            drawing = false; penHistory = []; brushWidth = 5.5;
+            document.getElementById('st-pen').textContent = '✋ 抬笔';
+        }
+    }
+
+    function handleCanvasPan(hand) {
+        if (!hand) { lastLeftX = null; lastLeftY = null; lastLeftTime = null; return; }
+        const wrist = toScreen(hand.landmarks[0]);
+        const now = performance.now();
+
+        if (lastLeftX !== null) {
+            const dx = wrist.x - lastLeftX;
+            const dy = wrist.y - lastLeftY;
+            const dt = Math.max(1, now - lastLeftTime);
+            targetOffsetX = clamp(targetOffsetX + dx * PAN_GAIN, maxOffsetX(), 0);
+            targetOffsetY = clamp(targetOffsetY + dy * PAN_GAIN, maxOffsetY(), 0);
+            velocityX = dx * PAN_GAIN / dt * 16;
+            velocityY = dy * PAN_GAIN / dt * 16;
+            updateViewportStatus();
+        }
+        lastLeftX = wrist.x; lastLeftY = wrist.y; lastLeftTime = now;
+    }
+
+    // ===== Three.js 星云球 =====
+    let scene, cam3D, renderer, sphere;
+    let tRS = 0, cRS = 0, tSc = 1, cSc = 1, tCZ = 15, cCZ = 15, lhx = null;
+
+    function initThree() {
+        scene = new THREE.Scene();
+        cam3D = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+        cam3D.position.z = 15;
+        renderer = new THREE.WebGLRenderer({ canvas: webglCanvas, antialias: true, alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.setClearColor(0x000000, 0);
+
+        const N = 4500, geo = new THREE.BufferGeometry();
+        const pos = new Float32Array(N*3), col = new Float32Array(N*3);
+        for (let i = 0; i < N; i++) {
+            const phi = Math.acos(-1 + 2*i/N), theta = Math.sqrt(N*Math.PI) * phi;
+            const d = 6 + (Math.random()-0.5)*1.8;
+            pos[i*3] = d*Math.cos(theta)*Math.sin(phi);
+            pos[i*3+1] = d*Math.sin(theta)*Math.sin(phi);
+            pos[i*3+2] = d*Math.cos(phi);
+            const r = i/N;
+            col[i*3] = r>0.5?0:0.95; col[i*3+1] = r>0.5?0.72:0.15; col[i*3+2] = 1;
+        }
+        geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+        geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+
+        const tc = document.createElement('canvas'); tc.width = tc.height = 16;
+        const tx = tc.getContext('2d');
+        const g = tx.createRadialGradient(8,8,0,8,8,8);
+        g.addColorStop(0,'rgba(255,255,255,1)'); g.addColorStop(0.3,'rgba(0,192,255,0.75)'); g.addColorStop(1,'rgba(0,0,0,0)');
+        tx.fillStyle = g; tx.fillRect(0,0,16,16);
+
+        sphere = new THREE.Points(geo, new THREE.PointsMaterial({
+            size: 0.22, vertexColors: true, transparent: true, opacity: 0.9,
+            blending: THREE.AdditiveBlending, depthWrite: false, map: new THREE.CanvasTexture(tc)
+        }));
+        scene.add(sphere);
+    }
+
+    function animThree() {
+        requestAnimationFrame(animThree);
+        if (mode !== 'nebula') return;
+        cRS += (tRS - cRS) * 0.08; sphere.rotation.y += cRS; sphere.rotation.x += 0.001;
+        cSc += (tSc - cSc) * 0.08; sphere.scale.set(cSc, cSc, cSc);
+        cCZ += (tCZ - cCZ) * 0.08; cam3D.position.z = cCZ;
+        if (cCZ < 5) { cam3D.rotation.y = Math.sin(performance.now()*0.0015)*0.05; cam3D.rotation.x = Math.cos(performance.now()*0.001)*0.05; }
+        else cam3D.rotation.set(0,0,0);
+        renderer.render(scene, cam3D);
+    }
+
+    function updateNebula(hands) {
+        if (!hands.length) { tRS *= 0.95; tSc += (1-tSc)*0.1; tCZ += (15-tCZ)*0.1; return; }
+        let avgO = 0;
+        hands.forEach(h => {
+            const lms = h.landmarks, w = lms[0]; let tot = 0;
+            [8,12,16,20].forEach((t,i) => { const m = [5,9,13,17][i]; tot += Math.hypot(lms[t].x-w.x, lms[t].y-w.y)/Math.hypot(lms[m].x-w.x, lms[m].y-w.y); });
+            avgO += clamp(1 - (1.8 - tot/4) / 0.75, 0, 1);
+        });
+        avgO /= hands.length;
+        tSc = 0.45 + avgO * 1.75;
+        if (hands.length >= 2 && avgO > 0.82) tCZ = 0.6; else tCZ = 15;
+        const wx = hands[0].landmarks[0].x;
+        if (lhx !== null) { const v = (wx - lhx) * 2; tRS = clamp(-v, -0.07, 0.07); }
+        lhx = wx;
+        if (Math.abs(tRS) < 0.002) tRS = 0.002;
+    }
+
+    // ===== 主循环 =====
+    function renderLoop() {
+        if (mode === 'write') {
+            drawBg();
+            if (lastLeftX === null && (Math.abs(velocityX) > PAN_STOP || Math.abs(velocityY) > PAN_STOP)) {
+                targetOffsetX = clamp(targetOffsetX + velocityX, maxOffsetX(), 0);
+                targetOffsetY = clamp(targetOffsetY + velocityY, maxOffsetY(), 0);
+                velocityX *= PAN_FRICTION;
+                velocityY *= PAN_FRICTION;
+                if (Math.abs(velocityX) <= PAN_STOP) velocityX = 0;
+                if (Math.abs(velocityY) <= PAN_STOP) velocityY = 0;
+                updateViewportStatus();
+            }
+            offsetX += (targetOffsetX - offsetX) * PAN_SMOOTH;
+            offsetY += (targetOffsetY - offsetY) * PAN_SMOOTH;
+            drawCanvas.style.transform = `translate3d(${offsetX}px, ${offsetY}px, 0)`;
+        }
+        requestAnimationFrame(renderLoop);
+    }
+
+    // ===== WebSocket =====
+    const socket = io();
+    socket.on('connect', () => {
+        document.getElementById('st-server').textContent = 'ACTIVE';
+        document.getElementById('st-server').className = 'text-emerald-400';
+        document.getElementById('gesture-info').textContent = '已连接';
+    });
+    socket.on('disconnect', () => {
+        document.getElementById('st-server').textContent = 'LOST';
+        document.getElementById('st-server').className = 'text-rose-400';
+    });
+
+    socket.on('hands', (data) => {
+        const hands = JSON.parse(data);
+        frameCount++;
+        const now = performance.now();
+        if (now - fpsStart > 1000) { document.getElementById('st-fps').textContent = frameCount; frameCount = 0; fpsStart = now; }
+        document.getElementById('st-hands').textContent = hands.length;
+
+        if (mode === 'write') {
+            let left = null, right = null;
+            hands.forEach(h => { if (h.handedness === 'Left') right = h; else if (h.handedness === 'Right') left = h; });
+            if (!left && !right && hands.length === 2) {
+                if (hands[0].landmarks[0].x < hands[1].landmarks[0].x) { left = hands[0]; right = hands[1]; } else { left = hands[1]; right = hands[0]; }
+            } else if (!left && !right && hands.length === 1) {
+                if (hands[0].landmarks[0].x > 0.5) right = hands[0]; else left = hands[0];
+            }
+            updateToolMode(left, right);
+            handleToolSelection(right);
+            const toolCooldownActive = performance.now() < toolSelectCooldown;
+            handleWrite(right, !toolMode && !toolCooldownActive);
+            const panHand = !toolMode && !toolCooldownActive ? left : null;
+            handleCanvasPan(panHand);
+            const gi = document.getElementById('gesture-info');
+            if (toolMode) {
+                gi.textContent = '顶部颜色条: 右手指向 / 捏合确认';
+                drawHud(hands);
+                return;
+            }
+            if (left && right) gi.textContent = '双手: 右写 / 左拖动画布';
+            else if (right) gi.textContent = '右手写字';
+            else if (left) gi.textContent = '左手拖动画布';
+            else gi.textContent = '等待手势';
+        } else { updateNebula(hands); }
+        drawHud(hands);
+    });
+
+    // ===== UI 事件 =====
+    document.getElementById('toggle-btn').onclick = () => {
+        const sb = document.getElementById('sidebar'), ic = document.getElementById('toggle-icon');
+        ic.textContent = sb.classList.toggle('collapsed') ? '▶' : '◀';
+    };
+    document.getElementById('clear-btn').onclick = () => dCtx.clearRect(0, 0, window.innerWidth * VIRTUAL_PAGES, window.innerHeight * VIRTUAL_ROWS);
+    document.querySelectorAll('[data-mode]').forEach(btn => btn.onclick = () => {
+        document.querySelectorAll('[data-mode]').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active'); mode = btn.dataset.mode; drawing = false; smoothPen = null; penHistory = []; closeToolMode();
+        webglCanvas.style.opacity = mode === 'nebula' ? '1' : '0';
+        bgCanvas.style.opacity = mode === 'nebula' ? '0.15' : '1';
+    });
+
+    // ===== 启动 =====
+    resize(); initThree(); renderLoop(); animThree();
+    </script>
+</body>
+</html>
