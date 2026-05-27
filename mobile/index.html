@@ -264,22 +264,45 @@
 
     // ===== MediaPipe Init =====
     async function initMediaPipe() {
-        showAlert('加载模型中...');
-        const vision = await FilesetResolver.forVisionTasks(
-            'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/wasm'
-        );
-        handLandmarker = await HandLandmarker.createFromOptions(vision, {
-            baseOptions: {
-                modelAssetPath: './hand_landmarker.task',
-                delegate: 'GPU',
-            },
-            runningMode: 'VIDEO',
-            numHands: 2,
-            minHandDetectionConfidence: 0.6,
-            minHandPresenceConfidence: 0.6,
-            minTrackingConfidence: 0.5,
-        });
-        showAlert('模型加载完成');
+        showAlert('加载 WASM...');
+        let vision;
+        try {
+            vision = await FilesetResolver.forVisionTasks(
+                'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/wasm'
+            );
+        } catch (e) {
+            document.getElementById('st-fps').textContent = 'WASM失败';
+            showAlert('WASM加载失败: ' + e.message);
+            console.error('WASM load error:', e);
+            return;
+        }
+
+        showAlert('加载模型...');
+        // 先尝试 GPU，失败则降级 CPU
+        for (const delegate of ['GPU', 'CPU']) {
+            try {
+                handLandmarker = await HandLandmarker.createFromOptions(vision, {
+                    baseOptions: {
+                        modelAssetPath: './hand_landmarker.task',
+                        delegate: delegate,
+                    },
+                    runningMode: 'VIDEO',
+                    numHands: 2,
+                    minHandDetectionConfidence: 0.5,
+                    minHandPresenceConfidence: 0.5,
+                    minTrackingConfidence: 0.4,
+                });
+                showAlert('就绪 (' + delegate + ')');
+                console.log('MediaPipe using delegate:', delegate);
+                return;
+            } catch (e) {
+                console.warn(delegate + ' failed:', e.message);
+                if (delegate === 'CPU') {
+                    document.getElementById('st-fps').textContent = '模型失败';
+                    showAlert('模型加载失败: ' + e.message);
+                }
+            }
+        }
     }
 
     // ===== Gesture Detection =====
@@ -578,9 +601,18 @@
     async function init() {
         resize();
         showAlert('加载中...');
-        await Promise.all([startCamera(), initMediaPipe()]);
-        showAlert('就绪 - 伸出手开始');
-        processFrame();
+        try {
+            await Promise.all([startCamera(), initMediaPipe()]);
+            if (handLandmarker) {
+                showAlert('就绪 - 伸出手开始');
+                processFrame();
+            } else {
+                showAlert('模型未就绪，请刷新重试');
+            }
+        } catch (e) {
+            showAlert('初始化失败: ' + e.message);
+            console.error('Init error:', e);
+        }
     }
 
     init();
